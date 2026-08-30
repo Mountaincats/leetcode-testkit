@@ -1,129 +1,31 @@
 #!/usr/bin/env python3
 import curses
 import datetime
-import fnmatch
-import hashlib
-import json
 import math
 import os
 import shlex
 import subprocess
 import sys
-import time
-from dataclasses import dataclass
 from pathlib import Path
 
+from testkit_discovery import (
+    Entry,
+    discover_source_suites,
+    discover_suites,
+    newest_timestamp,
+    runnable_sources,
+    suite_sources,
+)
+from testkit_settings import (
+    load_config,
+    normalize_search_roots,
+    save_config,
+    validate_config,
+)
+from testkit_templates import generate_templates, template_target_name, template_targets
 
-DEFAULTS = {
-    "search_roots": [],
-    "wrapper_pattern": "test.*",
-    "case_directory": "data",
-    "case_pattern": "*.case",
-    "sort_order": "time",
-    "use_valgrind": False,
-    "c_optimization": "0",
-    "cpp_optimization": "0",
-}
-SUPPORTED_SUFFIXES = {".c", ".cpp", ".py"}
 ESC_DELAY_MS = 25
-DISCOVERY_CACHE_TTL = 5.0
 FRAMEWORK_DIR = Path(__file__).resolve().parent.parent
-_DISCOVERY_MEMORY_CACHE = {}
-LANGUAGE_LABELS = {".c": "C", ".cpp": "C++", ".py": "Python"}
-NATIVE_OPTIMIZATION_LEVELS = {"0", "1", "2", "3", "g", "s", "fast"}
-
-
-@dataclass
-class Entry:
-    label: str
-    value: str
-    modified: float = 0.0
-
-
-# Configuration is shared by discovery, menus, and the shell runner.
-def normalize_search_roots(search_roots):
-    if not isinstance(search_roots, list):
-        raise ValueError("search roots must be a list")
-    roots = []
-    for configured_root in search_roots:
-        if not isinstance(configured_root, str) or not configured_root.strip():
-            raise ValueError("each search root must be a non-empty path")
-        root = Path(configured_root).expanduser()
-        if not root.is_absolute():
-            raise ValueError("each search root must be an absolute path")
-        roots.append(str(root.resolve()))
-    return roots
-
-
-def load_config(path, allow_empty_search=False):
-    config = dict(DEFAULTS)
-    config["search_roots"] = normalize_search_roots(DEFAULTS["search_roots"])
-    try:
-        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        if not allow_empty_search:
-            validate_config(config)
-        return config
-    except (json.JSONDecodeError, OSError) as error:
-        raise ValueError(f"cannot read config {path}: {error}") from error
-    for key in DEFAULTS:
-        if key in loaded:
-            config[key] = loaded[key]
-    config["search_roots"] = normalize_search_roots(config["search_roots"])
-    validate_config(config, allow_empty_search)
-    return config
-
-
-def save_config(path, config):
-    validate_config(config)
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(target.name + ".tmp")
-    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-                         encoding="utf-8")
-    temporary.replace(target)
-    try:
-        discovery_cache_file(config_path=target).unlink()
-    except FileNotFoundError:
-        pass
-
-
-def validate_config(config, allow_empty_search=False):
-    if not isinstance(config["search_roots"], list):
-        raise ValueError("search roots must be a list")
-    if not config["search_roots"] and not allow_empty_search:
-        raise ValueError("search roots are not configured; run make menuconfig")
-    if any(not isinstance(root, str) or not root.strip() for root in config["search_roots"]):
-        raise ValueError("each search root must be a non-empty path")
-    if any(not Path(root).is_absolute() for root in config["search_roots"]):
-        raise ValueError("each search root must be an absolute path")
-    for key in ("wrapper_pattern", "case_directory", "case_pattern"):
-        if not isinstance(config[key], str) or not config[key].strip():
-            raise ValueError(f"{key} cannot be empty")
-    wrapper_pattern = config["wrapper_pattern"]
-    if (Path(wrapper_pattern).name != wrapper_pattern or
-            wrapper_pattern.count("*") != 1 or
-            not wrapper_pattern.endswith(".*") or
-            any(character in wrapper_pattern for character in "?[]")):
-        raise ValueError("test wrapper glob must use the form <name>.*")
-    case_dir = Path(config["case_directory"])
-    if case_dir.is_absolute() or len(case_dir.parts) != 1 or case_dir.name in ("", ".", ".."):
-        raise ValueError("case directory must be one relative directory name")
-    if Path(config["case_pattern"]).name != config["case_pattern"]:
-        raise ValueError("test case glob must not contain a directory path")
-    if config["sort_order"] not in ("time", "name"):
-        raise ValueError("sort_order must be 'time' or 'name'")
-    if not isinstance(config["use_valgrind"], bool):
-        raise ValueError("use_valgrind must be true or false")
-    validate_optimization(config)
-
-
-def validate_optimization(config):
-    for language in ("c", "cpp"):
-        level = str(config[f"{language}_optimization"])
-        if level not in NATIVE_OPTIMIZATION_LEVELS:
-            raise ValueError(f"{language}_optimization must be one of 0, 1, 2, 3, g, s, fast")
-        config[f"{language}_optimization"] = level
 
 
 # Small curses widgets used by every interactive workflow.
@@ -445,7 +347,7 @@ def choose_value(window, title, choices, current):
         safe_addstr(window, 0, 0, title, curses.A_BOLD)
         safe_addstr(
             window, 1, 0,
-            "Up/Down or j/k: move  Enter: apply  Esc: cancel",
+            "Up/Down or j/k: move  Enter: apply  q: back",
             curses.A_DIM)
         for row, (label, _) in enumerate(choices, 3):
             attributes = curses.A_REVERSE if row - 3 == selected else 0
@@ -458,227 +360,8 @@ def choose_value(window, title, choices, current):
             selected = (selected + 1) % len(choices)
         elif key in (10, 13, curses.KEY_ENTER):
             return choices[selected][1]
-        elif key == 27:
+        elif key in (ord("q"), ord("Q")):
             return current
-
-
-# Source and wrapper matching rules define which suites are runnable.
-def matching_wrapper(suite, source, config):
-    return any(path.is_file() and path.suffix == source.suffix
-               for path in suite.glob(config["wrapper_pattern"]))
-
-
-def suite_sources(suite, config):
-    return [path for path in suite.iterdir()
-            if path.is_file() and path.suffix in SUPPORTED_SUFFIXES
-            and not fnmatch.fnmatch(path.name, config["wrapper_pattern"])]
-
-
-def runnable_sources(suite, config):
-    return [path for path in suite_sources(suite, config)
-            if matching_wrapper(suite, path, config)]
-
-
-def newest_timestamp(paths):
-    timestamps = []
-    for path in paths:
-        try:
-            timestamps.append(path.stat().st_mtime)
-        except OSError:
-            pass
-    return max(timestamps, default=0.0)
-
-
-# Cache regular test discovery because recursive project scans are frequent.
-def discovery_cache_file(project_root=None, config_path=None):
-    configured_dir = os.environ.get("TESTKIT_CACHE_DIR")
-    if configured_dir:
-        cache_dir = Path(configured_dir).expanduser()
-    elif project_root is not None:
-        cache_dir = Path(project_root) / ".testkit" / ".cache"
-    elif config_path is not None:
-        cache_dir = Path(config_path).parent.parent / ".cache"
-    else:
-        raise ValueError("project root or config path is required for cache discovery")
-    return cache_dir / "discovery.json"
-
-
-def discovery_cache_key(project_root, config):
-    content = json.dumps({"project_root": str(project_root.resolve()), "config": config},
-                         ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def load_discovery_cache(cache_key, cache_file):
-    if cache_key in _DISCOVERY_MEMORY_CACHE:
-        return _DISCOVERY_MEMORY_CACHE[cache_key]
-    try:
-        payload = json.loads(cache_file.read_text(encoding="utf-8"))
-        if payload.get("key") != cache_key:
-            return None
-        if time.time() - float(payload["created_at"]) > DISCOVERY_CACHE_TTL:
-            return None
-        entries = [Entry(item["label"], item["value"], float(item["modified"]))
-                   for item in payload["entries"]]
-    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
-        return None
-    _DISCOVERY_MEMORY_CACHE[cache_key] = entries
-    return entries
-
-
-def save_discovery_cache(cache_key, entries, cache_file):
-    _DISCOVERY_MEMORY_CACHE[cache_key] = entries
-    payload = {
-        "key": cache_key,
-        "created_at": time.time(),
-        "entries": [
-            {"label": entry.label, "value": entry.value, "modified": entry.modified}
-            for entry in entries
-        ],
-    }
-    try:
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(cache_file)
-    except OSError:
-        pass
-
-
-def discover_suites(project_root, config):
-    cache_key = discovery_cache_key(project_root, config)
-    cache_file = discovery_cache_file(project_root=project_root)
-    cached = load_discovery_cache(cache_key, cache_file)
-    if cached is not None:
-        return cached
-    found = {}
-    for configured_root in config["search_roots"]:
-        root = Path(configured_root).expanduser()
-        if not root.is_absolute():
-            root = project_root / root
-        if not root.is_dir():
-            continue
-        for case_dir in root.rglob(config["case_directory"]):
-            if not case_dir.is_dir():
-                continue
-            suite = case_dir.parent
-            sources = runnable_sources(suite, config)
-            cases = [path for path in case_dir.glob(config["case_pattern"]) if path.is_file()]
-            if not sources or not cases:
-                continue
-            wrappers = [path for path in suite.glob(config["wrapper_pattern"]) if path.is_file()]
-            modified = newest_timestamp(sources + wrappers + cases)
-            try:
-                label = str(suite.relative_to(project_root))
-            except ValueError:
-                label = str(suite)
-            value = label if not Path(label).is_absolute() else str(suite.resolve())
-            found[str(suite.resolve())] = Entry(label, value, modified)
-    entries = list(found.values())
-    save_discovery_cache(cache_key, entries, cache_file)
-    return entries
-
-
-def discover_source_suites(project_root, config):
-    found = {}
-    for configured_root in config["search_roots"]:
-        root = Path(configured_root).expanduser()
-        if not root.is_absolute():
-            root = project_root / root
-        if not root.is_dir():
-            continue
-        for source in root.rglob("*"):
-            if (not source.is_file() or source.suffix not in SUPPORTED_SUFFIXES or
-                    fnmatch.fnmatch(source.name, config["wrapper_pattern"])):
-                continue
-            suite = source.parent
-            try:
-                label = str(suite.relative_to(project_root))
-            except ValueError:
-                label = str(suite)
-            value = label if not Path(label).is_absolute() else str(suite.resolve())
-            key = str(suite.resolve())
-            entry = found.get(key)
-            modified = newest_timestamp([source])
-            if entry is None or modified > entry.modified:
-                found[key] = Entry(label, value, modified)
-    return list(found.values())
-
-
-# Template generation maps configured globs to safe language templates.
-def template_target_name(pattern, suffix):
-    if (Path(pattern).name != pattern or pattern.count("*") != 1 or
-            not pattern.endswith(".*") or any(character in pattern for character in "?[]")):
-        raise ValueError(
-            "template generation requires a simple '<name>.*' wrapper glob, such as 'test.*'")
-    return pattern[:-1] + suffix.lstrip(".")
-
-
-def template_targets(suite, config):
-    suffixes = sorted({source.suffix for source in suite_sources(suite, config)})
-    return [(suffix, suite / template_target_name(config["wrapper_pattern"], suffix))
-            for suffix in suffixes]
-
-
-def template_content(suffix, source_names):
-    listed_sources = "\n".join(f" *   {name}" for name in sorted(source_names))
-    if suffix in (".c", ".cpp"):
-        return f'''#include "testkit.h"
-
-#ifndef TESTKIT_SOURCE_PATH
-#error "TESTKIT_SOURCE_PATH must point to the source under test"
-#endif
-#include TESTKIT_SOURCE_PATH
-
-/* Detected {LANGUAGE_LABELS[suffix]} sources:
-{listed_sources}
- */
-static void test_source(const TestCase *test_case) {{
-    (void)test_case;
-    timer_start();
-#error "TODO: read case fields and call the source interface"
-    timer_stop();
-}}
-
-int main(void) {{
-    return run_cases(TESTKIT_DATA_DIR, test_source);
-}}
-'''
-    listed_sources = "\n".join(f"#   {name}" for name in sorted(source_names))
-    return f'''from testkit import load_source_module, run_cases, timer_start, timer_stop
-
-
-source_module = load_source_module()
-
-# Detected Python sources:
-{listed_sources}
-def test_source(test_case):
-    timer_start()
-    try:
-        raise NotImplementedError("TODO: read case fields and call the source interface")
-    finally:
-        timer_stop()
-
-
-if __name__ == "__main__":
-    raise SystemExit(run_cases(test_source))
-'''
-
-
-def generate_templates(suite, config, replace_existing):
-    sources = suite_sources(suite, config)
-    source_names = {}
-    for source in sources:
-        source_names.setdefault(source.suffix, []).append(source.name)
-    generated = []
-    skipped = []
-    for suffix, target in template_targets(suite, config):
-        if target.exists() and not replace_existing:
-            skipped.append(target)
-            continue
-        target.write_text(template_content(suffix, source_names[suffix]), encoding="utf-8")
-        generated.append(target)
-    return generated, skipped
 
 
 def source_entries(project_root, suite_value, config, mode):
