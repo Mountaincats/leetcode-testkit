@@ -61,3 +61,8 @@ search_path/.../<suite>/
 
 - [使用与命令](docs/usage.md)：运行与调试方式、测试结果说明、模板生成和设置。
 - [测试文件说明](docs/test-file.md)：项目文件结构约定、测试文件公共 API 和完整示例。
+- [环境与依赖](docs/dependencies.md)：Python 库说明、编译与调试工具以及操作系统支持。
+
+## 四、许可证
+
+本项目采用 [MIT License](LICENSE)。使用、修改或分发代码时，请保留许可证文件中的版权与许可声明。
