@@ -71,7 +71,7 @@ make template SUITE=exercise/HashTable/ex1 FORCE=1
 | C++ 优化等级 | `0` | `0/1/2/3/g/s/fast` |
 
 - 首次使用需要通过 `make menuconfig` 设置至少一个搜索根目录。搜索目录只接受绝对路径，路径字段支持 Tab 补全。
-- Valgrind、文件目录显示方式以及 C/C++ 优化等级均通过菜单选择，无需手动输入。优化等级选择支持方向键或 `j/k` 移动、`Enter` 应用、`Esc` 取消。
+- Valgrind 使用、文件目录显示方式以及 C/C++ 优化等级均通过菜单选择。
 - 每个 suite 目录中的 `.c`、`.cpp` 和 `.py` 文件都会被识别为待测源码，但测试文件除外，因此源码名称不受限制。
 - `make menuconfig` 将项目配置固定保存到执行 Make 的目录下：`.testkit/.config/settings.conf`。搜索根目录缓存保存在 `.testkit/.cache/discovery.json`，配置改变时自动失效。
   ```text
