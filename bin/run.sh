@@ -1,19 +1,51 @@
 #!/usr/bin/env bash
 set -u
 
-# Resolve framework paths and export the configured discovery patterns.
+# Resolve framework and project paths.
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 framework_dir="$(cd "$script_dir/.." && pwd)"
-repo_dir="$(cd "${TESTKIT_PROJECT_ROOT:-$framework_dir/..}" && pwd)"
+if [[ -z "${TESTKIT_PROJECT_ROOT:-}" ]]; then
+    echo "missing required environment variable: TESTKIT_PROJECT_ROOT" >&2
+    exit 2
+fi
+repo_dir="$(cd "$TESTKIT_PROJECT_ROOT" && pwd)"
 config_file="$repo_dir/.testkit/.config/settings.conf"
 export PYTHONDONTWRITEBYTECODE=1
 export LC_NUMERIC=C
 unset PYTHONPYCACHEPREFIX
-config_values="$(python3 "$script_dir/ui.py" config-shell "$config_file")" || exit 2
+config_values="$(python3 "$script_dir/config_loader.py" "$config_file")" || exit 2
 eval "$config_values"
-tool="test"
 
-# Locate same-language wrappers for the selected source or suite.
+# Parse the selected mode, suite and source.
+if [[ "$#" -ne 3 ]]; then
+    echo "usage: run.sh MODE SUITE SOURCE" >&2
+    exit 2
+fi
+mode="$1"
+suite="$2"
+source="$3"
+
+case "$mode" in
+    test|debug) ;;
+    *)
+        echo "unknown mode: $mode (expected test or debug)" >&2
+        exit 2
+        ;;
+esac
+
+suite="${suite%/}"
+suite="${suite#./}"
+if [[ "$suite" == /* ]]; then
+    suite_dir="$suite"
+else
+    suite_dir="$repo_dir/$suite"
+fi
+if [[ -z "$suite" || ! -d "$suite_dir/$TESTKIT_CASE_DIRECTORY" ]]; then
+    echo "invalid test suite: $suite" >&2
+    exit 2
+fi
+
+# Collect runnable sources and reject missing language wrappers.
 find_wrapper() {
     local directory="$1"
     local extension="$2"
@@ -28,71 +60,27 @@ find_wrapper() {
     return 1
 }
 
-has_wrapper() {
-    local candidate
-    while IFS= read -r candidate; do
-        [[ -f "$candidate" ]] && return 0
-    done < <(compgen -G "$1/$TESTKIT_WRAPPER_PATTERN" || true)
-    return 1
-}
-
-# Resolve the requested mode, suite, and optional source selection.
-case "${1:-}" in
-    --tool=*) tool="${1#--tool=}"; shift ;;
-    test|debug) tool="$1"; shift ;;
-esac
-
-case "$tool" in
-    test|debug) ;;
-    *)
-        echo "unknown tool: $tool (expected test or debug)" >&2
-        exit 2
-        ;;
-esac
-
-suite="${1:-}"
-source="${2:-}"
-
-if [[ -n "$suite" && -z "$source" && ! -d "$repo_dir/$suite" && ! -d "$suite" ]]; then
-    source="$suite"
-    suite=""
-fi
-
-if [[ -z "$suite" ]]; then
-    current_dir="$PWD"
-    while [[ "$current_dir" != "$repo_dir" && "$current_dir" != "/" ]]; do
-        if has_wrapper "$current_dir" && [[ -d "$current_dir/$TESTKIT_CASE_DIRECTORY" ]]; then
-            suite="${current_dir#"$repo_dir/"}"
-            break
-        fi
-        current_dir="$(dirname "$current_dir")"
-    done
-fi
-
-suite="${suite%/}"
-suite="${suite#./}"
-if [[ "$suite" == /* ]]; then
-    suite_dir="$suite"
-else
-    suite_dir="$repo_dir/$suite"
-fi
-if [[ -z "$suite" || ! -d "$suite_dir/$TESTKIT_CASE_DIRECTORY" ]] || ! has_wrapper "$suite_dir"; then
-    echo "usage: ./test/bin/run.sh [test|debug] TEST_SUITE [SOURCE]" >&2
-    echo "or run test/bin/run.sh [tool] [source] from a test suite directory" >&2
-    exit 2
-fi
-
-# Collect runnable sources and reject missing language wrappers.
 sources=()
 source_was_explicit=0
 if [[ -n "$source" ]]; then
     source_was_explicit=1
-    if [[ "$source" == *.c || "$source" == *.cpp || "$source" == *.py ]]; then
-        [[ -f "$suite_dir/$source" ]] && sources+=("$suite_dir/$source")
+    if [[ -f "$suite_dir/$source" ]]; then
+        case "$source" in
+            $TESTKIT_WRAPPER_PATTERN)
+                echo "selected source should not be a test file" >&2
+                exit 2
+                ;;
+            *.c|*.cpp|*.py)
+                sources+=("$suite_dir/$source")
+                ;;
+            *)
+                echo "error: unsupported file extension in source: $source (supported: .c, .cpp, .py)" >&2
+                exit 2
+                ;;
+        esac
     else
-        [[ -f "$suite_dir/$source.c" ]] && sources+=("$suite_dir/$source.c")
-        [[ -f "$suite_dir/$source.cpp" ]] && sources+=("$suite_dir/$source.cpp")
-        [[ -f "$suite_dir/$source.py" ]] && sources+=("$suite_dir/$source.py")
+        echo "error: source file not found: $suite_dir/$source" >&2
+        exit 2
     fi
 else
     while IFS= read -r source; do
@@ -101,22 +89,11 @@ else
         [[ "$source_name" == $TESTKIT_WRAPPER_PATTERN ]] && continue
         case "$source" in *.c|*.cpp|*.py) sources+=("$source") ;; esac
     done < <(compgen -G "$suite_dir/*" || true)
-fi
 
-if [[ ${#sources[@]} -eq 0 ]]; then
-    echo "no C, C++ or Python source found in $suite" >&2
-    exit 2
-fi
-
-filtered_sources=()
-for source in "${sources[@]}"; do
-    source_name="${source##*/}"
-    [[ "$source_name" == $TESTKIT_WRAPPER_PATTERN ]] || filtered_sources+=("$source")
-done
-sources=("${filtered_sources[@]}")
-if [[ ${#sources[@]} -eq 0 ]]; then
-    echo "selected source matches the test wrapper glob '$TESTKIT_WRAPPER_PATTERN'" >&2
-    exit 2
+    if [[ ${#sources[@]} -eq 0 ]]; then
+        echo "no C, C++ or Python source found in $suite" >&2
+        exit 2
+    fi
 fi
 
 runnable_sources=()
@@ -137,6 +114,11 @@ if [[ ${#sources[@]} -eq 0 ]]; then
     exit 2
 fi
 
+if [[ "$mode" == "debug" && ${#sources[@]} -ne 1 ]]; then
+    echo "debug requires exactly one source; specify SOURCE (include its extension if the name is ambiguous)" >&2
+    exit 2
+fi
+
 # Keep execution and summary order deterministic across filesystems.
 sorted_sources=()
 while IFS= read -r source; do
@@ -144,31 +126,23 @@ while IFS= read -r source; do
 done < <(printf '%s\n' "${sources[@]}" | LC_ALL=C sort)
 sources=("${sorted_sources[@]}")
 
-if [[ "$tool" == "debug" && ${#sources[@]} -ne 1 ]]; then
-    echo "debug requires exactly one source; specify SOURCE (include its extension if the name is ambiguous)" >&2
-    exit 2
-fi
-
-# Check mode-specific tools before creating any build workspace.
+# Check mode-specific tools.
 required_commands=()
-case "$tool" in
-    test|debug)
-        needs_native=0
-        needs_python=0
-        for source in "${sources[@]}"; do
-            [[ "$source" == *.c || "$source" == *.cpp ]] && needs_native=1
-            [[ "$source" == *.py ]] && needs_python=1
-        done
-        if [[ "$needs_native" -eq 1 ]]; then
-            if [[ "$tool" == "debug" ]]; then
-                required_commands+=("gdb")
-            elif [[ "$TESTKIT_USE_VALGRIND" == "1" ]]; then
-                required_commands+=("valgrind")
-            fi
-        fi
-        [[ "$needs_python" -eq 1 ]] && required_commands+=("python3")
-        ;;
-esac
+needs_native=0
+needs_python=0
+for source in "${sources[@]}"; do
+    [[ "$source" == *.c || "$source" == *.cpp ]] && needs_native=1
+    [[ "$source" == *.py ]] && needs_python=1
+done
+if [[ "$needs_native" -eq 1 ]]; then
+    if [[ "$mode" == "debug" ]]; then
+        required_commands+=("gdb")
+    elif [[ "$TESTKIT_USE_VALGRIND" == "1" ]]; then
+        required_commands+=("valgrind")
+    fi
+fi
+[[ "$needs_python" -eq 1 ]] && required_commands+=("python3")
+
 for required_command in "${required_commands[@]}"; do
     if ! command -v "$required_command" >/dev/null 2>&1; then
         echo "required command not found: $required_command" >&2
@@ -176,6 +150,7 @@ for required_command in "${required_commands[@]}"; do
     fi
 done
 
+# Compile or load each source, then dispatch to its test or debug tool.
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/testkit.XXXXXX")" || exit 1
 cleanup() {
     rm -rf -- "$work_dir"
@@ -227,7 +202,6 @@ print_source_header() {
     printf '\n-- %s --\n' "$source_name"
 }
 
-# Compile or load each source, then dispatch to its test or debug tool.
 for source_file in "${sources[@]}"; do
     source_name="$(basename "$source_file")"
     selected="${source_name%.*}"
@@ -243,7 +217,7 @@ for source_file in "${sources[@]}"; do
     if [[ "$extension" == "py" ]]; then
         find_wrapper "$suite_dir" "$extension" || exit 2
         print_source_header
-        case "$tool" in
+        case "$mode" in
             test)
                 TESTKIT_SOURCE_FILE="$source_file" TESTKIT_DATA_DIR="$suite_dir/$TESTKIT_CASE_DIRECTORY" \
                     TESTKIT_CASE_PATTERN="$TESTKIT_CASE_PATTERN" TESTKIT_RESULT_FILE="$result_file" \
@@ -293,7 +267,7 @@ for source_file in "${sources[@]}"; do
         record_result "$source_status"
         continue
     fi
-    case "$tool" in
+    case "$mode" in
         test)
             TESTKIT_CASE_PATTERN="$TESTKIT_CASE_PATTERN" TESTKIT_RESULT_FILE="$result_file" \
                 TESTKIT_TIMING_FILE="$timing_file" "$binary"

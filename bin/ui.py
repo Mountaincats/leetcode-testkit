@@ -22,7 +22,11 @@ from testkit_settings import (
     save_config,
     validate_config,
 )
-from testkit_templates import generate_templates, template_target_name, template_targets
+from testkit_templates import (
+    generate_templates,
+    template_target_name,
+    template_targets,
+)
 
 ESC_DELAY_MS = 25
 FRAMEWORK_DIR = Path(__file__).resolve().parent.parent
@@ -262,7 +266,7 @@ def pick(window, title, entries, order, allow_search=True):
         height, width = window.getmaxyx()
         safe_addstr(window, 0, 0, title, curses.A_BOLD)
         sort_label = "recently modified" if order == "time" else "name"
-        help_text = "Up/Down or j/k: move  Enter: select  Esc: back"
+        help_text = "Up/Down or j/k: move  Enter: select  q: back"
         if allow_search:
             help_text += "  /: search"
         safe_addstr(window, 1, 0, f"Sort: {sort_label}  {help_text}", curses.A_DIM)
@@ -300,7 +304,7 @@ def pick(window, title, entries, order, allow_search=True):
             selected = len(filtered) - 1
         elif key in (10, 13, curses.KEY_ENTER) and filtered:
             return filtered[selected].value
-        elif key == 27:
+        elif key in (ord("q"), ord("Q")):
             return None
         elif key == ord("/") and allow_search:
             query = prompt_text(
@@ -321,21 +325,15 @@ def confirm(window, title, message, question="Replace existing template files?")
         yes_attributes = curses.A_REVERSE if selected else 0
         safe_addstr(window, 6, 2, "No", no_attributes)
         safe_addstr(window, 6, 10, "Yes", yes_attributes)
-        safe_addstr(window, 8, 0, "Left/Right or h/l: move  Enter: confirm  Esc: cancel", curses.A_DIM)
+        safe_addstr(window, 8, 0, "Left/Right or h/l: move  Enter: confirm", curses.A_DIM)
         window.refresh()
         key = window.getch()
         if key in (curses.KEY_LEFT, ord("h")):
             selected = False
         elif key in (curses.KEY_RIGHT, ord("l")):
             selected = True
-        elif key in (ord("y"), ord("Y")):
-            return True
-        elif key in (ord("n"), ord("N")):
-            return False
         elif key in (10, 13, curses.KEY_ENTER):
             return selected
-        elif key == 27:
-            return None
 
 
 def choose_value(window, title, choices, current):
@@ -440,9 +438,6 @@ def configure_screen(window, config, config_path):
                 saved_message = f"Saved to {config_path}"
                 saved_once = True
                 dirty = False
-        elif key_code == 27:
-            error_message = ""
-            saved_message = "Press q to quit"
         elif key_code in (ord("q"), ord("Q")):
             if dirty:
                 discard = confirm(
@@ -555,7 +550,7 @@ def run_select(mode, project_root, config_path, suite, source):
     environment = os.environ.copy()
     environment["TESTKIT_PROJECT_ROOT"] = str(project_root)
     runner = FRAMEWORK_DIR / "bin" / "run.sh"
-    return subprocess.run([str(runner), f"--tool={selected_mode}", selected_suite, selected_source],
+    return subprocess.run([str(runner), selected_mode, selected_suite, selected_source],
                           cwd=project_root, env=environment, check=False).returncode
 
 
@@ -618,21 +613,6 @@ def run_template(project_root, config_path, fixed_suite, force):
     return 0
 
 
-# Export configuration to Bash and route command-line subcommands.
-def print_shell_config(config_path):
-    config = load_config(config_path)
-    values = {
-        "TESTKIT_WRAPPER_PATTERN": config["wrapper_pattern"],
-        "TESTKIT_CASE_DIRECTORY": config["case_directory"],
-        "TESTKIT_CASE_PATTERN": config["case_pattern"],
-        "TESTKIT_USE_VALGRIND": "1" if config["use_valgrind"] else "0",
-        "TESTKIT_C_OPTIMIZATION": config["c_optimization"],
-        "TESTKIT_CPP_OPTIMIZATION": config["cpp_optimization"],
-    }
-    for key, value in values.items():
-        print(f"{key}={shlex.quote(value)}")
-
-
 def main(argv):
     os.environ["ESCDELAY"] = str(ESC_DELAY_MS)
     if hasattr(curses, "set_escdelay"):
@@ -649,15 +629,11 @@ def main(argv):
         if command == "template" and len(argv) == 6:
             force = argv[5].casefold() in ("1", "true", "yes", "on")
             return run_template(Path(argv[2]).resolve(), Path(argv[3]).resolve(), argv[4], force)
-        if command == "config-shell" and len(argv) == 3:
-            print_shell_config(Path(argv[2]).resolve())
-            return 0
     except (IndexError, ValueError, OSError) as error:
         print(f"testkit: {error}", file=sys.stderr)
         return 2
     print("usage: ui.py configure PROJECT CONFIG | select MODE PROJECT CONFIG SUITE SOURCE | "
-          "template PROJECT CONFIG SUITE FORCE | "
-          "config-shell CONFIG",
+          "template PROJECT CONFIG SUITE FORCE | ",
           file=sys.stderr)
     return 2
 
