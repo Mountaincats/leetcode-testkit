@@ -242,11 +242,13 @@ for source_file in "${sources[@]}"; do
         compiler="g++"
         standard="-std=c++17"
         optimization="-O$TESTKIT_CPP_OPTIMIZATION"
+        link_flags=""
         find_wrapper "$suite_dir" "$extension" || exit 2
     else
         compiler="gcc"
         standard="-std=c11"
         optimization="-O$TESTKIT_C_OPTIMIZATION"
+        link_flags="-lm"
         find_wrapper "$suite_dir" "$extension" || exit 2
     fi
 
@@ -261,6 +263,7 @@ for source_file in "${sources[@]}"; do
         -DTESTKIT_SOURCE_PATH="\"$source_file\"" \
         -DTESTKIT_DATA_DIR="\"$suite_dir/$TESTKIT_CASE_DIRECTORY\"" \
         "$wrapper" "$framework_object" \
+        "$link_flags" \
         -o "$binary"
     source_status=$?
     if [[ "$source_status" -ne 0 ]]; then
