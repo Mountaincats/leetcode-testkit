@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 DEFAULTS = {
-    "search_roots": [],
+    "search_roots": [os.path.join(os.environ.get("TESTKIT_DIR"), "example")],
     "wrapper_pattern": "test.*",
     "case_directory": "data",
     "case_pattern": "*.case",

@@ -2,7 +2,11 @@
 
 面向 C、C++ 和 Python 的本地测试工具，可用于为 LeetCode 试题提供测试和调试环境。
 
+---
+
 ## 一、快速开始
+
+### (1) 环境搭建
 
 测试框架需要 GNU Make、Bash 以及带 `curses` 的 Python 3.7+，编译器和调试工具按需安装，详细说明见[环境与依赖](docs/dependencies.md)。
 
@@ -30,13 +34,21 @@ include leetcode-testkit/framework.mk
 make -f leetcode-testkit/framework.mk <target>
 ```
 
-搜索目录默认未设置，首次使用先设置源码搜索目录的绝对路径：
+### (2) 运行测试
+
+首次使用前需要生成配置文件，源码搜索目录默认设置为 `TESTKIT_DIR/example`，后续使用时可另外设置源码搜索路径：
 
 ```bash
+cd project_name
 make menuconfig
 ```
 
-主要命令：
+然后测试 `TESTKIT_DIR/example` 下的代码：
+```bash
+make test
+```
+
+### (3) 主要命令
 
 ```bash
 # 进行测试和调试前需要先编写测试文件
@@ -51,26 +63,33 @@ make test SUITE=exercise/HashTable/ex1 SOURCE=all
 make debug SUITE=exercise/HashTable/ex1 SOURCE=method1.c
 ```
 
-## 二、文件结构默认约定
+---
+
+## 二、测试文件夹结构约定
 
 ```bash
 search_path/.../<suite>/
-├── method1.c
+├── method1.c     # 待测源码
 ├── method2.py
 ├── method3.cpp
-├── test.c
+├── test.c        # 测试文件
 ├── test.py
 ├── test.cpp
-└── data/*.case
+└── data/*.case   # 测试用例
 ```
 
 框架在已配置的搜索目录中查找 `suite`，将 `suite` 中除 `test.*` 外的 `.c`、`.cpp`、`.py` 文件作为待测源码，并读取 `data/*.case` 作为测试数据。
+测试文件名 `test.*`、测试用例文件夹名 `data/` 及测试用例文件名 `*.case` 均可通过 `make menuconfig` 修改。
+
+---
 
 ## 三、文档
 
 - [使用与命令](docs/usage.md)：运行与调试方式、测试结果说明、模板生成和设置。
 - [测试文件说明](docs/test-file.md)：项目文件结构约定、测试文件公共 API 和完整示例。
 - [环境与依赖](docs/dependencies.md)：Python 库说明、编译与调试工具以及操作系统支持。
+
+---
 
 ## 四、许可证
 

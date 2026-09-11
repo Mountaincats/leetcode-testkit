@@ -7,7 +7,7 @@ TESTKIT_PROJECT_ROOT := $(CURDIR)
 TESTKIT_STATE_DIR := $(TESTKIT_PROJECT_ROOT)/.testkit
 TESTKIT_CACHE_DIR := $(TESTKIT_STATE_DIR)/.cache
 TESTKIT_CONFIG := $(TESTKIT_STATE_DIR)/.config/settings.conf
-export TESTKIT_CACHE_DIR
+export TESTKIT_CACHE_DIR TESTKIT_DIR
 
 .PHONY: test debug template menuconfig help
 
